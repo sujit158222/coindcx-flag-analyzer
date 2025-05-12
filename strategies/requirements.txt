@@ -1,0 +1,7 @@
+streamlit
+ccxt
+pandas
+matplotlib
+numpy
+ta
+requests
