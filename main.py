@@ -1,35 +1,98 @@
-
-import pandas as pd
 import streamlit as st
-from strategies.flag_breakout import detect_bullish_flag
+import pandas as pd
+import ccxt
+import numpy as np
 
-# Mock function to simulate fetching OHLCV from CoinDCX (replace with actual fetch)
+# ----------------------------------------
+# Robust OHLCV Fetcher with Fallback
+# ----------------------------------------
 def get_ohlcv(symbol, timeframe="15m"):
-    import ccxt
-    exchange = ccxt.binance()
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe)
+    # Try CoinDCX first
+    try:
+        exchange = ccxt.coindcx()
+        exchange.load_markets()
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe)
+    except Exception as e:
+        st.warning(f"CoinDCX failed for {symbol}, trying Binance... ({e})")
+        try:
+            exchange = ccxt.binance()
+            exchange.load_markets()
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe)
+        except Exception as e2:
+            raise RuntimeError(f"Both CoinDCX and Binance failed for {symbol}: {e2}")
+
     df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     return df
 
-# Telegram alert function
-def send_telegram(msg):
-    import requests
-    token = "7965615706:AAHHHFwMHYgRumpWgDeU3FdI0lllbNvtEGg"
-    chat_id = "1096439077"
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    requests.post(url, data={"chat_id": chat_id, "text": msg})
+# ----------------------------------------
+# Pattern 1: Bullish Flag
+# ----------------------------------------
+def detect_bullish_flag(df):
+    recent = df.tail(20)
+    prices = recent["close"].values
+    return (
+        prices[-1] > prices[-2] > prices[-3]
+        and prices[-4] > prices[-3]
+        and prices[-5] > prices[-4]
+        and prices[-6] > prices[-5]
+    )
 
-# Streamlit app
-st.title("CoinDCX Bullish Flag Breakout Detector")
-symbol = st.text_input("Enter symbol (e.g. PIPPIN/USDT):", "PIPPIN/USDT")
+# ----------------------------------------
+# Pattern 2: Bullish Pennant
+# ----------------------------------------
+def detect_bullish_pennant(df):
+    recent = df.tail(30)
+    closes = recent["close"].values
+    max_idx = np.argmax(closes)
+    min_idx = np.argmin(closes)
+    return min_idx < max_idx and max_idx > len(closes) - 5
 
-if st.button("Scan Now"):
-    df = get_ohlcv(symbol)
-    signal = detect_bullish_flag(df)
+# ----------------------------------------
+# Pattern 3: Double Bottom
+# ----------------------------------------
+def detect_double_bottom(df):
+    recent = df.tail(50)
+    closes = recent["close"].values
+    minima = (closes[1:-1] < closes[:-2]) & (closes[1:-1] < closes[2:])
+    min_indices = np.where(minima)[0] + 1
+    if len(min_indices) >= 2:
+        for i in range(len(min_indices) - 1):
+            if abs(closes[min_indices[i]] - closes[min_indices[i + 1]]) / closes[min_indices[i]] < 0.02:
+                return True
+    return False
 
-    if signal:
-        st.success(f"🚀 Breakout detected at {signal['breakout_price']} USDT")
-        send_telegram(f"🚨 {symbol} breakout above {signal['resistance']}! Current: {signal['breakout_price']}")
-    else:
-        st.warning("No breakout yet. Pattern still forming.")
+# ----------------------------------------
+# Streamlit UI
+# ----------------------------------------
+st.set_page_config(page_title="Multi-Exchange Bullish Pattern Scanner", layout="wide")
+st.title("📈 Multi-Exchange Bullish Pattern Scanner")
+
+coins = ["PIPPIN/USDT", "SOL/USDT", "BTC/USDT", "ETH/USDT", "DOGE/USDT"]
+
+if st.button("🔍 Scan Now"):
+    results = []
+    for symbol in coins:
+        try:
+            df = get_ohlcv(symbol)
+            flag = detect_bullish_flag(df)
+            pennant = detect_bullish_pennant(df)
+            double_bottom = detect_double_bottom(df)
+
+            patterns = []
+            if flag:
+                patterns.append("🏴 Bullish Flag")
+            if pennant:
+                patterns.append("📍 Bullish Pennant")
+            if double_bottom:
+                patterns.append("〰️ Double Bottom")
+
+            results.append({
+                "Symbol": symbol,
+                "Detected Patterns": ", ".join(patterns) if patterns else "No Pattern"
+            })
+
+        except Exception as e:
+            results.append({"Symbol": symbol, "Detected Patterns": f"❌ Error: {str(e)}"})
+
+    st.dataframe(pd.DataFrame(results))
